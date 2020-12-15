@@ -13,9 +13,11 @@ Make sure to change to working directory: <br>
 ```pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"```
 
 ## Running Analytical Pipeline
-1). Make sure you have the sample data (either the example [sample data](/CensusData/SampleData.xlsx) or generate using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) ).
+1). Download the analysis script: [CovidPPIGithub.Rmd](/CovidPPIGithub.Rmd)
 
-2). Install required R packages:
+2). Make sure you have the sample data (either the example [sample data](/CensusData/SampleData.xlsx) or generate using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) ).
+
+3). Install required R packages:
 - [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html)
 - [table1](https://cran.r-project.org/web/packages/table1/index.html)
 - [DataExplorer](https://boxuancui.github.io/DataExplorer/)
@@ -23,7 +25,7 @@ Make sure to change to working directory: <br>
 - [mice](https://cran.r-project.org/web/packages/mice/index.html)
 - [tibbletime](https://cran.r-project.org/web/packages/tibbletime/index.html)
 
-3). Get required publicly available geocoded social determinants of health and mobility datasets from our [figshare repository](https://figshare.com/articles/dataset/Datasets_supporting_analytical_workflow_of_Chronic_Acid_Suppression_and_Social_Determinants_of_COVID-19_Infection/13380356).
+4). Get required publicly available geocoded social determinants of health and mobility datasets from our [figshare repository](https://figshare.com/articles/dataset/Datasets_supporting_analytical_workflow_of_Chronic_Acid_Suppression_and_Social_Determinants_of_COVID-19_Infection/13380356).
 - zcta_county_rel_10.txt - Population and housing density from the 2010 decennial census
 - cre-2018-a11.csv - Community Resilience Estimates which is is the capacity of individuals and households to absorb, endure, and recover from the health, social, and economic impacts of a disaster such as a hurricane or pandemic
 - zcta_tract_rel_10.txt - Relationship between ZCTA and US Census tracts (used to map census tracts to ZCTA)
@@ -31,10 +33,19 @@ Make sure to change to working directory: <br>
 - mobility_report_US.txt - Google mobility report which charts movement trends over time by geography, across different categories of places such as retail and recreation, groceries and pharmacies, parks, transit stations, workplaces, and residential
 - ACS2015_zctaallvars.csv - Social Deprivation Index is a composite measure of area level deprivation based on seven demographic characteristics collected in the American Community Survey (https://www.census.gov/programs-surveys/acs/) and used to quantify the socio-economic variation in health outcomes
 
-4). Put the files downloaded from our [figshare repository] and either the example [sample data](/CensusData/SampleData.xlsx) or data generated using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) into a directory called <b>CensusData</b> which is inside of your working directory.
+5). Put the files downloaded from our [figshare repository] and either the example [sample data](/CensusData/SampleData.xlsx) or data generated using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) into a directory called <b>CensusData</b> which is inside of your working directory.
 
-5). Get a US Census API key from: https://api.census.gov/data/key_signup.html
+6). Get a US Census API key from: https://api.census.gov/data/key_signup.html
 
-6). Replace "YourKeyHere" text with the obtained census API key:
+7). Replace "YourKeyHere" text with the obtained census API key:
 
 ``` censusAPIkey <- "YourKeyHere" ```
+
+8). Update the working directory:
+
+```pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"```
+
+9). Run through the script
+
+### Notes
+We have removed the SafeGraph mobility data from the example script as users need to sign up on their own in accordance with SafeGraph's data use policies. Users can obtain the SafeGraph mobility data from: https://www.safegraph.com/covid-19-data-consortium and we can provide guidance on how users can integrate this data into the provided analytical workflow.
