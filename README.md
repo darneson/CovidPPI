@@ -9,8 +9,6 @@ Required R packages are:
 - [openxlsx](https://cran.r-project.org/web/packages/openxlsx/index.html)
 <br>
 Make sure to change to working directory: <br>
-```
-pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"
-```
+    pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"
 
 ## Running Analytical Pipeline
