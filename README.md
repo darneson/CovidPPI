@@ -33,4 +33,8 @@ Make sure to change to working directory: <br>
 
 4). Put the files downloaded from our [figshare repository] and either the example [sample data](/CensusData/SampleData.xlsx) or data generated using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) into a directory called <b>CensusData</b> which is inside of your working directory.
 
-5). Get a US Census API key from: (https://api.census.gov/data/key_signup.html)[https://api.census.gov/data/key_signup.html]
+5). Get a US Census API key from: https://api.census.gov/data/key_signup.html
+
+6). Replace "YourKeyHere" text with the obtained census API key:
+
+``` censusAPIkey <- "YourKeyHere" ```
