@@ -14,6 +14,7 @@ Make sure to change to working directory: <br>
 
 ## Running Analytical Pipeline
 1). Make sure you have the sample data (either the example [sample data](/CensusData/SampleData.xlsx) or generate using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) ).
+
 2). Install required R packages:
 - [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html)
 - [table1](https://cran.r-project.org/web/packages/table1/index.html)
@@ -29,3 +30,7 @@ Make sure to change to working directory: <br>
 - mask-use-by-county.txt - Mask Use By County comes from a large number of interviews conducted online by the global data and survey firm Dynata at the request of The New York Times. The firm asked a question about mask use to obtain 250,000 survey responses between July 2 and July 14
 - mobility_report_US.txt - Google mobility report which charts movement trends over time by geography, across different categories of places such as retail and recreation, groceries and pharmacies, parks, transit stations, workplaces, and residential
 - ACS2015_zctaallvars.csv - Social Deprivation Index is a composite measure of area level deprivation based on seven demographic characteristics collected in the American Community Survey (https://www.census.gov/programs-surveys/acs/) and used to quantify the socio-economic variation in health outcomes
+
+4). Put the files downloaded from our [figshare repository] and either the example [sample data](/CensusData/SampleData.xlsx) or data generated using the provided script [GenerateSampleData.Rmd](/GenerateSampleData.Rmd) into a directory called <b>CensusData</b> which is inside of your working directory.
+
+5). Get a US Census API key from: (https://api.census.gov/data/key_signup.html)[https://api.census.gov/data/key_signup.html]
