@@ -8,6 +8,9 @@ Required R packages are:
 - [tidyverse](https://cran.r-project.org/web/packages/tidyverse/index.html)
 - [openxlsx](https://cran.r-project.org/web/packages/openxlsx/index.html)
 <br>
-Make sure to change to working directory: `<pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1">`
+Make sure to change to working directory: 
+```r
+pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"
+```
 
 ## Running Analytical Pipeline
