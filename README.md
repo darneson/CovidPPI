@@ -21,6 +21,7 @@ Make sure to change to working directory: <br>
 - [tidycensus](https://cran.r-project.org/web/packages/tidycensus/index.html)
 - [mice](https://cran.r-project.org/web/packages/mice/index.html)
 - [tibbletime](https://cran.r-project.org/web/packages/tibbletime/index.html)
+<br>
 3). Get required publicly available geocoded social determinants of health and mobility datasets from [figshare](https://figshare.com/articles/dataset/Datasets_supporting_analytical_workflow_of_Chronic_Acid_Suppression_and_Social_Determinants_of_COVID-19_Infection/13380356).
 - zcta_county_rel_10.txt - Population and housing density from the 2010 decennial census
 - cre-2018-a11.csv - Community Resilience Estimates which is is the capacity of individuals and households to absorb, endure, and recover from the health, social, and economic impacts of a disaster such as a hurricane or pandemic
