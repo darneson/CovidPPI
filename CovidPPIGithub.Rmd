@@ -1,1 +1,883 @@
-temp
+---
+title: "COVID19 PPI Results Github Demo"
+author: "DA + VR + COVIDPPI team"
+date: "12/14/2020"
+output:
+#  pdf_document: default
+#  html_notebook: default
+---
+### Description
+Here, we investigate how the use of proton pump inhibitors affects the risk of COVID-19 infection. Data is derived from the manual chart review from 3 medical centers: UCSF, UCLA and UCSD. To protect patient health information, the data used to demonstrate our analytical workflow has been randomly generated.
+
+### Load packages and set working directory
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load packages
+library(tidyverse)
+library(table1) # make the table one plot
+library(DataExplorer) # visualize the data
+library(tidycensus) # access census data
+library(mice) # used for multiple imputation
+library(tibbletime) # used for rolling means (get weekly average for google movement data)
+
+# Set working directory
+pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"
+setwd(pathUse)
+
+# Set US Census API key
+# Get census API key from: https://api.census.gov/data/key_signup.html
+censusAPIkey <- "YourKeyHere"
+```
+
+### Read the data and preprocess
+
+```{r preprocess, message=FALSE, warning=FALSE}
+# Read excel sheet of the randomly generated data from: GenerateSampleData.Rmd
+dtOrig = readxl::read_excel('./CensusData/SampleData.xlsx', sheet = 'Analysis')
+
+# Convert numerical encoding of site to categorial
+dtOrig <- dtOrig %>%
+  mutate(`Location (Site)` = replace(`Location (Site)`, `Location (Site)` == 0, 'UCSF')) %>%
+  mutate(`Location (Site)` = replace(`Location (Site)`, `Location (Site)` == 1, 'UCSD')) %>%
+  mutate(`Location (Site)` = replace(`Location (Site)`, `Location (Site)` == 2, 'UCLA'))
+
+# Convert numerical encoding of race to categorial
+dtOrig <- dtOrig %>%
+  mutate(CorrectedRace = replace(CorrectedRace, CorrectedRace == 0, 'White')) %>%
+  mutate(CorrectedRace = replace(CorrectedRace, CorrectedRace == 1, 'Asian')) %>%
+  mutate(CorrectedRace = replace(CorrectedRace, CorrectedRace == 2, 'Black')) %>%
+  mutate(CorrectedRace = replace(CorrectedRace, CorrectedRace == 3, 'White')) %>%
+  mutate(CorrectedRace = replace(CorrectedRace, CorrectedRace == 4, 'Other')) %>%
+  mutate(Race = CorrectedRace)
+
+# Convert numerical encoding of ethnicity to categorial
+dtOrig <- dtOrig %>%
+  mutate(Ethnicity = replace(Ethnicity, Ethnicity == 0, 'NonLatinx')) %>%
+  mutate(Ethnicity = replace(Ethnicity, Ethnicity == 1, 'Latinx'))
+
+# Rederive the CCI score using the relevant information
+dtOrig <- dtOrig %>%
+  mutate(CCI = ifelse(Age < 50, 0, ifelse(Age >= 80, 4, ceiling((Age - 49) / 10))) + #score from age
+           `Myocardial Infarction` +
+           `Congestive Heart Failure` + 
+           `Peripheral Vascular Disease` + 
+           `Stroke (CVA or TIA)` + 
+           Dementia + 
+           COPD + 
+           `Connective Tissue Disease` + 
+           `Peptic Ulcer Disease` + 
+           ifelse(`Liver Disease`==2,3,`Liver Disease`) + 
+           `Diabetes Mellitus` + 
+           Hemiplegia*2 + 
+           `Moderate to Severe CKD (Cre > 3)`*2 + 
+           ifelse(`Solid Tumor`==2,6, ifelse(`Solid Tumor`==1,2,`Solid Tumor`)) + 
+           Leukemia*2 + 
+           Lymphoma*2 + 
+           AIDS*6)
+
+# Convert numerical encoding of dwelling to categorial
+dtOrig <- dtOrig %>%
+  mutate(Apartment = replace(Apartment, Apartment == 0, 'SingleFamilyHome')) %>%
+  mutate(Apartment = replace(Apartment, Apartment == 1, 'Apt')) %>%
+  mutate(Apartment = replace(Apartment, Apartment == 2, 'SNF')) %>%
+  mutate(Apartment = replace(Apartment, Apartment == 3, 'Homeless')) %>%
+  mutate(Apartment = replace(Apartment, Apartment == 4, 'Cruise'))
+
+# And binary encode most variables (otherwise they are too sparse)
+dtOrig <- dtOrig %>%
+  mutate(`Smoker (including marijuana)` = replace(`Smoker (including marijuana)`, `Smoker (including marijuana)` == 2, 1)) %>%
+  mutate(`EtOH use disorder` = replace(`EtOH use disorder`, `EtOH use disorder` == 2, 1)) %>% 
+  mutate(`Diabetes Mellitus` = replace(`Diabetes Mellitus`, `Diabetes Mellitus` == 2, 1)) %>%
+  mutate(`Liver Disease` = replace(`Liver Disease`, `Liver Disease` == 2, 1)) %>%
+  mutate(`Solid Tumor` = replace(`Solid Tumor`, `Solid Tumor` == 2, 1)) %>%
+  mutate(HIV = replace(HIV, HIV == 2, 1)) %>%
+  mutate(AcidSuppression = ifelse(PPI > 0 | H2RA > 0, 1, 0)) # Add acid suppression (if they take either PPI or H2RA) -- if either is NA, it gets set to NA
+
+# Make sure everyone is 18+
+# One person is under 18, now have 870 individuals
+dtOrig <- dtOrig %>%
+  filter(Age >= 18)
+
+# Drop everyone who does not have a defined zip code -- we want to map a bunch of features based on Zip
+# This drops 4 individuals --> 866 individuals
+dtOrig <- dtOrig %>%
+  drop_na(`Residence Zip Code`)
+```
+
+### Add in US Census and other location-based data
+
+```{r}
+# Population Density: zcta_county_rel_10.txt -- this is from the 2010 decennial census
+# ZCTAs do not always line up exactly with ZIP codes, but this is the best we can do
+# Obtained from: https://www2.census.gov/geo/docs/maps-data/data/rel/zcta_county_rel_10.txt
+# Important Columns: ZPOP - 2010 Population of the 2010 ZCTA; ZHU - 2010 Housing Unit Count of the 2010 ZCTA; ZAREA - Total Area of the 2010 ZCTA; ZAREALAND - Total Land Area of the 2010 ZCTA; 
+popDensity <- read_csv(file = "./CensusData/zcta_county_rel_10.txt")
+popDensity <- popDensity %>%
+  mutate(ZAREALAND = ZAREALAND/(1609.34*1609.34)) %>% # Convert area from square meters to square miles
+  mutate(ZPOPDENS = ZPOP/ZAREALAND) %>% # Get the population density
+  mutate(ZHUDENS = ZHU/ZAREALAND) %>% # Get the housing density
+  select(STATE, COUNTY, ZCTA5, ZPOPDENS, ZHUDENS) %>% # Only keep State ID, County ID, ZCTA, population density, and housing density
+  group_by(ZCTA5) %>% # Based on how these are mapped, some ZCTA's can correspond to multiple counties -- here, we just select the first county (which we use for downstream mapping)
+  slice(1) %>%
+  ungroup
+
+# Community Resilience Estimates
+# Community resilience is the capacity of individuals and households to absorb, endure, and recover from the health, social, and economic impacts of a disaster such as a hurricane or pandemic.
+# Obtained from: https://www.census.gov/data/experimental-data-products/community-resilience-estimates.html
+# Use: predrt -- percentages of the risk factors
+cre <- read_csv(file = "./CensusData/cre-2018-a11.csv")
+creFilter <- cre %>%
+  mutate(state = as.numeric(state)) %>% # Convert state to numeric from character for joins
+  #filter(tract == "000000") %>% # we want values for the whole county (not specific census tracts); we can't get zip level data (county data will have to do)
+  select(state, county, tract, rfgrp, predrt) %>% # Only keep state ID, county ID, census tract ID, community resilience group, and community resilience percent
+  pivot_wider(names_from = rfgrp, values_from = predrt) # Convert from long to wide format
+
+# Relationship between ZCTA and US Census tracts -- use to map census tract to ZCTA
+# Obtained from: https://www.census.gov/geographies/reference-files/time-series/geo/relationship-files.html#par_textimage_674173622
+zctaRelationship <- read_csv(file = "./CensusData/zcta_tract_rel_10.txt")
+zctaRelationship <- zctaRelationship %>%
+  select(ZCTA5, STATE, COUNTY, TRACT)
+
+# Convert Community Resilience Estimates from census blocks to ZCTAs (take the average value)
+creFilter <- creFilter %>%
+  left_join(zctaRelationship, by = c("state" = "STATE", "county" = "COUNTY", "tract" = "TRACT")) %>% # Left join to map census tract to ZCTA
+  select(-tract) %>% # no longer need this column
+  group_by(state, county, ZCTA5) %>%
+  summarise(`0RF` = mean(`0RF`), `1-2RF` = mean(`1-2RF`), `3PLRF` = mean(`3PLRF`))# ZCTA's can contain multiple census tracts -- get average values
+
+# Mask Use By County
+# This data comes from a large number of interviews conducted online by the global data and survey firm Dynata at the request of The New York Times. The firm asked a question about mask use to obtain 250,000 survey responses between July 2 and July 14, enough data to provide estimates more detailed than the state level.
+# Data from: https://github.com/nytimes/covid-19-data/tree/master/mask-use
+maskUse <- read_csv(file = "./CensusData/mask-use-by-county.txt")
+maskUse <- maskUse %>%
+  separate(COUNTYFP, into = c("state", "county"), sep = 2) %>% # Split into state and county codes (to match other data sources)
+  mutate(state = as.numeric(state)) %>% # Convert state to numeric from character for joins
+  rename(mask_never = NEVER, mask_rarely = RARELY, mask_sometimes = SOMETIMES, mask_frequently = FREQUENTLY, mask_always = ALWAYS)
+
+# To map state and county names to numeric codes use the community resiliance estimates dataset
+creMap <- cre %>%
+  select(state, county, stname, ctname) %>% # Keep the columns of interest
+  unique() %>% # Remove duplicates
+  separate(col = ctname, into = c("COUNTY", "STATE"), sep = ", ") # remove state name from county name
+
+# Google mobility report
+# Data from: https://github.com/ActiveConclusion/COVID19_mobility/blob/master/google_reports/mobility_report_US.csv
+# The reports chart movement trends over time by geography, across different categories of places such as retail and recreation, groceries and pharmacies, parks, transit stations, workplaces, and residential.
+mobilityReport <- read_csv(file = "./CensusData/mobility_report_US.txt")
+
+# The function to use at each step is `mean`, the window size is 7
+rolling_mean_na <- rollify(~mean(.x, na.rm = TRUE), window = 7)
+
+# Take the average value over the past 7 days
+mobilityReport <- mobilityReport %>%
+  left_join(creMap, by = c("state" = "stname", "county" = "COUNTY")) %>% # Convert state and county to numeric codes
+  select(state.y, county.y, date, `retail and recreation`, `grocery and pharmacy`, parks, `transit stations`, workplaces, residential) %>% # keep the relevant columns
+  rename(STATE = state.y, COUNTY = county.y, mobility_date = date, google_retail = `retail and recreation`, google_grocery = `grocery and pharmacy`,
+         google_parks = `parks`, google_transit = `transit stations`, google_workplaces = workplaces, google_residential = residential) %>% # rename columns
+  mutate(STATE = as.numeric(STATE)) %>% # Convert state to numeric from character for joins
+  # mutate(mobility_date = mobility_date - 7) %>% # set the dates a week earlier (we will use the mobility data from a week before they were tested)
+  drop_na(STATE, COUNTY) %>% # remove entries where state or county are NA --> gets messed up with the cruise
+  group_by(STATE, COUNTY) %>% # group by state and county to average values over the past week
+  filter(n() >= 7) %>% # need at least a week of data
+  mutate(google_retail = rolling_mean_na(google_retail)) %>% #get average values over the past week
+  mutate(google_grocery = rolling_mean_na(google_grocery)) %>% #get average values over the past week
+  mutate(google_parks = rolling_mean_na(google_parks)) %>% #get average values over the past week
+  mutate(google_transit = rolling_mean_na(google_transit)) %>% #get average values over the past week
+  mutate(google_workplaces = rolling_mean_na(google_workplaces)) %>% #get average values over the past week
+  mutate(google_residential = rolling_mean_na(google_residential)) %>% #get average values over the past week
+  ungroup
+
+# Social Deprivation Index
+# Data from: https://www.graham-center.org/rgc/maps-data-tools/sdi/social-deprivation-index.html
+# SDI is a composite measure of area level deprivation based on seven demographic characteristics collected in the American Community Survey (https://www.census.gov/programs-surveys/acs/) and used to quantify the socio-economic variation in health outcomes. Factors are: Income, Education, Employment, Housing, Household Characteristics, Transportation, Demographics
+sdi <- read_csv(file = "./CensusData/ACS2015_zctaallvars.csv")
+sdi <- sdi %>%
+  select(zcta, sdi_score) %>% # Select columns of interest
+  mutate(zcta = as.character(zcta)) # Convert ZCTA to character from numeric for joins
+
+# These are missing leading zeros -- add
+sdi[which(nchar(sdi$zcta)==4),"zcta"] <- paste0("0",pull(sdi[which(nchar(sdi$zcta)==4),"zcta"]))
+
+# Get census API key from: https://api.census.gov/data/key_signup.html
+census_api_key(censusAPIkey)
+
+# Variables of interest from US Census
+
+# name label concept
+# B19013_001	Estimate!!Median household income in the past 12 months (in 2018 inflation-adjusted dollars)	MEDIAN HOUSEHOLD INCOME IN THE PAST 12 MONTHS 
+# B08301_010	Estimate!!Total!!Public transportation (excluding taxicab)	MEANS OF TRANSPORTATION TO WORK --> this is counts (need to normalize by population - Universe: Workers 16 years and Over)
+# B25026_001	Estimate!!Total population in occupied housing units	TOTAL POPULATION IN OCCUPIED HOUSING UNITS BY TENURE BY YEAR HOUSEHOLDER MOVED INTO UNIT
+# B08301_019	Estimate!!Total!!Walked	MEANS OF TRANSPORTATION TO WORK --> this is counts (need to normalize by population - Universe: Workers 16 years and Over)
+
+# Need to sum up the different categories of 16+ workers
+# B08018_001	Estimate!!Total	PLACE OF WORK FOR WORKERS 16 YEARS AND OVER--NOT METROPOLITAN OR MICROPOLITAN STATISTICAL AREA LEVEL
+# B08017_001	Estimate!!Total PLACE OF WORK FOR WORKERS 16 YEARS AND OVER--MICROPOLITAN STATISTICAL AREA LEVEL
+# B08016_001	Estimate!!Total PLACE OF WORK FOR WORKERS 16 YEARS AND OVER--METROPOLITAN STATISTICAL AREA LEVEL
+
+# Pull the census data from the API
+censusData <- get_acs(geography = "zip code tabulation area",
+                      variables = c(MedianIncome = "B19013_001",
+                                    PublicTransportation = "B08301_010",
+                                    WalkToWork = "B08301_019",
+                                    WorkersOver16a = "B08018_001",
+                                    WorkersOver16b = "B08017_001",
+                                    WorkersOver16c = "B08016_001"),
+                      year = 2018,
+                      survey = "acs5",
+                      geometry = FALSE)
+
+# Format the data to be compatible with our other data
+censusData <- censusData %>%
+  select(GEOID, variable, estimate) %>% # Get the columns we want to keep
+  pivot_wider(names_from = variable, values_from = estimate) %>% # Convert from long to wide format
+  mutate(WorkersOver16 = WorkersOver16a + WorkersOver16b + WorkersOver16c) %>% # Get the total number of workers over 16
+  mutate(PublicTransportation = PublicTransportation/WorkersOver16) %>% # Get the fraction of workers who take public transportation
+  mutate(WalkToWork = WalkToWork/WorkersOver16) %>% # Get the fraction of workers who walk
+  select(GEOID, MedianIncome, PublicTransportation, WalkToWork)
+
+# Add ZCTAs to the clinical data
+dtOrig <- dtOrig %>%
+  mutate(ZCTA = `Residence Zip Code`) %>% # In most instances, the zip is the same as the ZCTA
+  mutate(ZCTA = as.character(ZCTA)) %>%
+  mutate(`Residence Zip Code` = as.character(`Residence Zip Code`)) %>%
+  left_join(censusData, by = c("ZCTA" = "GEOID")) %>% # Join the census data with the clinical data using ZCTAs
+  left_join(popDensity, by = c("ZCTA" = "ZCTA5")) %>% # Add population and housing density using ZCTAs
+  left_join(creFilter, by = c("STATE" = "state", "COUNTY" = "county", "ZCTA" = "ZCTA5")) %>% # Add Community Resilience Estimates using ZCTA averages from census blocks
+  left_join(maskUse, by = c("STATE" = "state", "COUNTY" = "county")) %>% # Add new york times mask use estimates using counties
+  left_join(mobilityReport, by = c("STATE" = "STATE", "COUNTY" = "COUNTY", "Date of COVID-19 Test" = "mobility_date")) %>% # Add in mobility data from google using county and date (date we are using is 7 days before the test date to get an idea of what it was like ~7 days before the test)
+  left_join(sdi, by = c("ZCTA" = "zcta"))
+
+rm(censusData, cre, creFilter, creMap, maskUse, mobilityReport, popDensity, sdi, zctaRelationship)
+gc()
+```
+
+### Look at the missingness of all the variables and use this to remove sparse variables
+
+```{r missing2, echo = TRUE, fig.height = 12, fig.width = 12, fig.align = "center"}
+plot_missing(dtOrig)
+```
+
+### Remove factors which have a lot of missing entries
+
+```{r}
+# Remove factors which have a lot of N/A's (above)
+dtFilter <- dtOrig %>%
+  select(-c(`COVID-19 Test Comments`, `Comments...50`, `Comments...12`, `H2RA Comments & Indication`, `H2RA Dose (mg)`, `Duration of H2RA use (months)`, `H2RA Type`, `H2RA Frequency`,
+            `Autoimmune comments`, `Current CaTx`, `Prior Ca Tx`, `Type of cancer comments`, `PPI Comments & Indication`, `Duration of PPI use (months)`, `PPI Dose (mg)`, `PPI Frequency`,
+            `PPI Type`, `Medications for conditions`, `Group living home (SNF / Rehab, etc)`, `Recent ABX Use (< 3 mo) & type`)) %>%
+# Rename some of the factors we are keeping
+  rename(Patient = `Patient ID #`, Site = `Location (Site)` , COVID = `COVID-19 Dx`, CVDate = `Date of COVID-19 Test`, Zip = `Residence Zip Code`,
+         Reflux = `GERD/Reflux`, MI = `Myocardial Infarction`, HF = `Congestive Heart Failure`, VD = `Peripheral Vascular Disease`, 
+         Stroke = `Stroke (CVA or TIA)`, Cancer = `Hx Cancer`, CTD = `Connective Tissue Disease`, Ulcer = `Peptic Ulcer Disease`, 
+         LiverDisease = `Liver Disease`, Diabetes = `Diabetes Mellitus`, SevereCKD = `Moderate to Severe CKD (Cre > 3)`, 
+         Tumor = `Solid Tumor`, CKD = `CKD (Cre < 3)`, Opioid = `Chronic opiate use`, 
+         Immunocompromised = `Immunocompromised (by med or comorbidity)`, Smoker = `Smoker (including marijuana)`, 
+         EtOH = `EtOH use disorder`, Healthcare = `Healthcare worker`, State = STATE, County = COUNTY, PopulationDensity = ZPOPDENS,
+         HousingDensity = ZHUDENS,  PercLowRiskFactors = `0RF`, PercModerateRiskFactors = `1-2RF`, PercHighRiskFactors = `3PLRF`)
+```
+
+### After filtering, confirm that the missing data looks good for these factors
+```{r missing3, echo = TRUE, fig.height = 12, fig.width = 12, fig.align = "center"}
+plot_missing(dtFilter)
+```
+
+### See if there are individuals with high %s of missing data we can remove
+
+```{r}
+dtFilter <- dtFilter %>%
+  mutate(numNAs = rowSums(is.na(dtFilter))/ncol(dtFilter))
+
+dtFilter %>% ggplot(aes(x = numNAs)) +
+  geom_histogram(binwidth = 0.01, color = "#114477", fill = "#77AADD") +
+  geom_vline(xintercept = 0.1, linetype = "dotted", color = "black", size = 1) +
+  xlab("% NAs") +
+  ylab("Num Individuals") +
+  theme_bw(base_size = 12)
+```
+
+### There are 5 invidiuals who have >=10% of their data missing
+### Remove those individuals  866 --> 861
+
+```{r}
+dtFilter <- dtFilter %>%
+  filter(numNAs < 0.1) %>%
+  select(-numNAs)
+```
+
+### After filtering individuals, see if there are any factors we want to remove
+```{r missing4, echo = TRUE, fig.height = 12, fig.width = 12, fig.align = "center"}
+plot_missing(dtFilter)
+```
+
+### Use MICE (multiple imputation) to impute the missing features -- first clean the data
+
+```{r}
+# Save a copy of our data before we clean things up and impute
+dtFilterCopy <- dtFilter
+
+# Clean up before imputation
+dtFilter <- dtFilter %>%
+  select(-c(Patient)) %>% # Remove unique columns
+  select(-c(CorrectedRace, `CCI Score`, ZCTA, State, County)) %>% # Remove redundant columns
+  # Encode sex as male and female
+  mutate(Sex = ifelse(Sex == 0, "Male", "Female")) %>% # Change sex from numeric encoding to Male and Female
+  # Convert categorical to factor
+  mutate(Site = as.factor(Site), Sex = as.factor(Sex), Race = as.factor(Race), Ethnicity = as.factor(Ethnicity), Zip = as.factor(Zip),
+         Apartment = as.factor(Apartment), Zip = as.factor(Zip))
+
+dtFilter
+```
+
+### Try a chi-squared test to find reasonable values to cut the continuous variables at
+
+```{r}
+# Try chi-squared test
+testChi <- dtFilter
+# Generate the aggregate values
+testChi <- testChi %>%
+  mutate(mask_rarely = mask_rarely + mask_sometimes + mask_frequently + mask_always) %>%
+  mutate(mask_sometimes = mask_sometimes + mask_frequently + mask_always) %>%
+  mutate(mask_frequently = mask_frequently + mask_always)
+
+# Covariates to get chi-squared cut point for
+variablesUse <- c("MedianIncome", "PublicTransportation", "WalkToWork", "PopulationDensity", "HousingDensity", "PercLowRiskFactors", "PercModerateRiskFactors",
+                  "PercHighRiskFactors", "mask_rarely", "mask_sometimes", "mask_frequently", "mask_never", "mask_always", "google_retail",
+                  "google_grocery", "google_parks", "google_transit", "google_workplaces", "google_residential", "sdi_score")
+
+covariateCutpoints <- list()
+
+# Iterate through each covariate
+for(variableName in variablesUse){
+  # Only consider the between 10th and 90th percentiles after trimming the lowest and highest values
+  allValues <- sort(pull(testChi[which(!is.na(testChi[,variableName])),variableName]))
+  allValues <- allValues[-which(allValues == min(allValues, na.rm = T))]
+  allValues <- allValues[-which(allValues == max(allValues, na.rm = T))]
+  # Find the cut point with the lowest p-value
+  allPvals <- NULL
+  for(i in floor(length(allValues)/10):floor(length(allValues)-length(allValues)/10)){
+    variableFilter <- allValues[i]
+    chisquare <- data.frame(NoCovid = c(length(which(testChi$COVID == 0 & testChi[,variableName] > variableFilter)),
+                                        length(which(testChi$COVID == 0 & testChi[,variableName] <= variableFilter))),
+                            Covid = c(length(which(testChi$COVID == 1 & testChi[,variableName] > variableFilter)),
+                                      length(which(testChi$COVID == 1 & testChi[,variableName] <= variableFilter))))
+    pval <- -log10(chisq.test(chisquare)$p.value)
+    toAdd <- data.frame(Value = variableFilter, Pval = pval)
+    if(is.null(allPvals)){
+      allPvals <- toAdd
+    } else{
+      allPvals <- rbind(allPvals, toAdd)
+    }
+  }
+  # Find the value for the min cut point
+  pvalUse <- allPvals[which(allPvals$Pval == min(allPvals$Pval, na.rm = T)),]
+  # Arbitrarily pick the first value if there are multiple cut points with the same value
+  pvalUse <- pvalUse[1,]
+  covariateCutpoints[[variableName]] <- pvalUse$Value
+}
+```
+
+### Split continous variables into groups before imputation -- using chi squared value
+
+```{r}
+# Remove columns for imputation so the matrix is not singular -- can add them back after imputation
+dtFilterIMP <- dtFilter
+
+# Split continuous variables into binary
+dtFilterIMP <- dtFilterIMP %>%
+  mutate(CVDate = lubridate::month(CVDate, label = FALSE)) %>% # Change date to months (numeric)
+  mutate(CVDate = recode(CVDate, "3" = "Mar", "4" = "Apr", "5" = "May", "6" = "Jun")) %>% # Change numeric month encoding to strings
+  mutate(CVDate = as.factor(CVDate)) %>% # Change date to factor
+  mutate(CVDate = factor(CVDate, levels = c("Mar", "Apr", "May", "Jun"))) %>% # Set the order of the factor so we can have march as the reference
+  mutate(Age = ifelse(Age > 65, ">65 yr", "≤65 yr")) %>% # Change age to two groups based on older or younger than 65
+  mutate(Age = factor(Age, levels = c("≤65 yr", ">65 yr"))) %>% # Set the order of the factor so we can have ≤65 yr as the reference
+  mutate(Sex = factor(Sex, levels = c("Male", "Female"))) %>% # Set the order of the factor so we can have male as the reference
+  mutate(Race = factor(Race, levels = c("White", "Asian", "Black", "Other"))) %>% # Set the order of the factor so we can have white as the reference
+  mutate(Ethnicity = str_replace(Ethnicity, "NonLatinx", "Not Latinx")) %>% # Change the naming convention of NonLatinx
+  mutate(Ethnicity = as.factor(Ethnicity)) %>% # Change Ethnicity to factor
+  mutate(Ethnicity = factor(Ethnicity, levels = c("Not Latinx", "Latinx"))) %>% # Set the order of the factor so we can have not latinx as the reference
+  select(-Zip) %>% #Drop zip code
+  mutate(BMI = ifelse(BMI >= 30, "≥30", ifelse(BMI < 30,"<30", NA))) %>% # Change BMI to two groups based on greater than or less than 30 (obese)
+  mutate(BMI = factor(BMI, levels = c("<30", "≥30"))) %>%
+  mutate(Apartment = factor(Apartment, levels = c("SingleFamilyHome", "Apt", "SNF", "Homeless", "Cruise"))) %>% # Set the order of the factor so we can have Single Family Home as the reference
+  # Recode CCI
+  mutate(CCI = recode(CCI, "0" = "0-2: Mild", "1" = "0-2: Mild", "2" = "0-2: Mild", "3" = "3-4: Moderate", "4" = "3-4: Moderate", "5" = "≥5: Severe",
+                      "6" = "≥5: Severe", "7" = "≥5: Severe", "8" = "≥5: Severe", "9" = "≥5: Severe", "10" = "≥5: Severe", "11" = "≥5: Severe",
+                      "12" = "≥5: Severe", "13" = "≥5: Severe", "14" = "≥5: Severe", "15" = "≥5: Severe")) %>% # Recode the numeric CCI score into groups
+  mutate(CCI = as.factor(CCI)) %>%
+  mutate(CCI = factor(CCI, levels = c("0-2: Mild", "3-4: Moderate", "≥5: Severe"))) %>%
+  mutate(MedianIncome = ifelse(MedianIncome > covariateCutpoints$MedianIncome, paste0(">$",prettyNum(round(covariateCutpoints$MedianIncome, digits = -3), scientific=F, big.mark=",")), ifelse(MedianIncome <= covariateCutpoints$MedianIncome,paste0("≤$",prettyNum(round(covariateCutpoints$MedianIncome, digits = -3), scientific=F, big.mark=",")), NA))) %>% 
+  mutate(MedianIncome = factor(MedianIncome, levels = c(paste0("≤$",prettyNum(round(covariateCutpoints$MedianIncome, digits = -3), scientific=F, big.mark=",")), paste0(">$",prettyNum(round(covariateCutpoints$MedianIncome, digits = -3), scientific=F, big.mark=","))))) %>%
+  mutate(PublicTransportation = ifelse(PublicTransportation > covariateCutpoints$PublicTransportation, paste0(">",prettyNum(round(100*covariateCutpoints$PublicTransportation, digits = 1), scientific=F, big.mark=","),"%"), ifelse(PublicTransportation <= covariateCutpoints$PublicTransportation,paste0("≤",prettyNum(round(100*covariateCutpoints$PublicTransportation, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(PublicTransportation = factor(PublicTransportation, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$PublicTransportation, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$PublicTransportation, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(WalkToWork = ifelse(WalkToWork > covariateCutpoints$WalkToWork, paste0(">",prettyNum(round(100*covariateCutpoints$WalkToWork, digits = 1), scientific=F, big.mark=","),"%"), ifelse(WalkToWork <= covariateCutpoints$WalkToWork,paste0("≤",prettyNum(round(100*covariateCutpoints$WalkToWork, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>% 
+  mutate(WalkToWork = factor(WalkToWork, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$WalkToWork, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$WalkToWork, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(PopulationDensity = ifelse(PopulationDensity > round(covariateCutpoints$PopulationDensity, digits = -2), paste0(">",prettyNum(round(covariateCutpoints$PopulationDensity, digits = -2), scientific=F, big.mark=",")), ifelse(PopulationDensity <= round(covariateCutpoints$PopulationDensity, digits = -2), paste0("≤",prettyNum(round(covariateCutpoints$PopulationDensity, digits = -2), scientific=F, big.mark=",")), NA))) %>%
+  mutate(PopulationDensity = factor(PopulationDensity, levels = c( paste0("≤",prettyNum(round(covariateCutpoints$PopulationDensity, digits = -2), scientific=F, big.mark=",")), paste0(">",prettyNum(round(covariateCutpoints$PopulationDensity, digits = -2), scientific=F, big.mark=","))))) %>%
+  mutate(HousingDensity = ifelse(HousingDensity > round(covariateCutpoints$HousingDensity, digits = -2),  paste0(">",prettyNum(round(covariateCutpoints$HousingDensity, digits = -2), scientific=F, big.mark=",")), ifelse(HousingDensity <= round(covariateCutpoints$HousingDensity, digits = -2), paste0("≤",prettyNum(round(covariateCutpoints$HousingDensity, digits = -2), scientific=F, big.mark=",")), NA))) %>%
+  mutate(HousingDensity = factor(HousingDensity, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$HousingDensity, digits = -2), scientific=F, big.mark=",")),  paste0(">",prettyNum(round(covariateCutpoints$HousingDensity, digits = -2), scientific=F, big.mark=","))))) %>%
+  mutate(PercLowRiskFactors = ifelse(PercLowRiskFactors > round(covariateCutpoints$PercLowRiskFactors, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$PercLowRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), ifelse(PercLowRiskFactors <= round(covariateCutpoints$PercLowRiskFactors, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$PercLowRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(PercLowRiskFactors = factor(PercLowRiskFactors, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$PercLowRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$PercLowRiskFactors, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(PercModerateRiskFactors = ifelse(PercModerateRiskFactors > round(covariateCutpoints$PercModerateRiskFactors, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$PercModerateRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), ifelse(PercModerateRiskFactors <= round(covariateCutpoints$PercModerateRiskFactors, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$PercModerateRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(PercModerateRiskFactors = factor(PercModerateRiskFactors, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$PercModerateRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$PercModerateRiskFactors, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(PercHighRiskFactors = ifelse(PercHighRiskFactors > round(covariateCutpoints$PercHighRiskFactors, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$PercHighRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), ifelse(PercHighRiskFactors <= round(covariateCutpoints$PercHighRiskFactors, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$PercHighRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(PercHighRiskFactors = factor(PercHighRiskFactors, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$PercHighRiskFactors, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$PercHighRiskFactors, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  # Generate a new feature which is mask_rarely + mask_sometimes + mask_frequently + mask_always
+  mutate(mask_rarely = mask_rarely + mask_sometimes + mask_frequently + mask_always) %>%
+  mutate(mask_rarely = ifelse(mask_rarely > covariateCutpoints$mask_rarely, paste0(">",prettyNum(round(100*covariateCutpoints$mask_rarely, digits = 1), scientific=F, big.mark=","),"%"), ifelse(mask_rarely <= covariateCutpoints$mask_rarely,paste0("≤",prettyNum(round(100*covariateCutpoints$mask_rarely, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>% 
+  mutate(mask_rarely = factor(mask_rarely, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$mask_rarely, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$mask_rarely, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  # Generate a new feature which is mask_sometimes + mask_frequently + mask_always
+  mutate(mask_sometimes = mask_sometimes + mask_frequently + mask_always) %>%
+  mutate(mask_sometimes = ifelse(mask_sometimes > covariateCutpoints$mask_sometimes, paste0(">",prettyNum(round(100*covariateCutpoints$mask_sometimes, digits = 1), scientific=F, big.mark=","),"%"), ifelse(mask_sometimes <= covariateCutpoints$mask_sometimes,paste0("≤",prettyNum(round(100*covariateCutpoints$mask_sometimes, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(mask_sometimes = factor(mask_sometimes, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$mask_sometimes, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$mask_sometimes, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  # Generate a new feature which is mask_frequently + mask_always
+  mutate(mask_frequently = mask_frequently + mask_always) %>%
+  mutate(mask_frequently = ifelse(mask_frequently > covariateCutpoints$mask_frequently, paste0(">",prettyNum(round(100*covariateCutpoints$mask_frequently, digits = 1), scientific=F, big.mark=","),"%"), ifelse(mask_frequently <= covariateCutpoints$mask_frequently,paste0("≤",prettyNum(round(100*covariateCutpoints$mask_frequently, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(mask_frequently = factor(mask_frequently, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$mask_frequently, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$mask_frequently, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(mask_never = ifelse(mask_never > covariateCutpoints$mask_never, paste0(">",prettyNum(round(100*covariateCutpoints$mask_never, digits = 1), scientific=F, big.mark=","),"%"), ifelse(mask_never <= covariateCutpoints$mask_never,paste0("≤",prettyNum(round(100*covariateCutpoints$mask_never, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(mask_never = factor(mask_never, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$mask_never, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$mask_never, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(mask_always = ifelse(mask_always > covariateCutpoints$mask_always, paste0(">",prettyNum(round(100*covariateCutpoints$mask_always, digits = 1), scientific=F, big.mark=","),"%"), ifelse(mask_always <= covariateCutpoints$mask_always,paste0("≤",prettyNum(round(100*covariateCutpoints$mask_always, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(mask_always = factor(mask_always, levels = c(paste0("≤",prettyNum(round(100*covariateCutpoints$mask_always, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(100*covariateCutpoints$mask_always, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_retail = ifelse(google_retail > round(covariateCutpoints$google_retail, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_retail, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_retail <= round(covariateCutpoints$google_retail, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$google_retail, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_retail = factor(google_retail, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$google_retail, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_retail, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_grocery = ifelse(google_grocery > round(covariateCutpoints$google_grocery, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_grocery, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_grocery <= round(covariateCutpoints$google_grocery, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$google_grocery, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_grocery = factor(google_grocery, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$google_grocery, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_grocery, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_parks = ifelse(google_parks > round(covariateCutpoints$google_parks, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_parks, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_parks <= round(covariateCutpoints$google_parks, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$google_parks, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_parks = factor(google_parks, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$google_parks, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_parks, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_transit = ifelse(google_transit > round(covariateCutpoints$google_transit, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_transit, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_transit <= round(covariateCutpoints$google_transit, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$google_transit, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_transit = factor(google_transit, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$google_transit, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_transit, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_workplaces = ifelse(google_workplaces > round(covariateCutpoints$google_workplaces, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_workplaces, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_workplaces <= round(covariateCutpoints$google_workplaces, digits = 1), paste0("≤",prettyNum(round(covariateCutpoints$google_workplaces, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_workplaces = factor(google_workplaces, levels = c( paste0("≤",prettyNum(round(covariateCutpoints$google_workplaces, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_workplaces, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(google_residential = ifelse(google_residential > round(covariateCutpoints$google_residential, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$google_residential, digits = 1), scientific=F, big.mark=","),"%"), ifelse(google_residential <= round(covariateCutpoints$google_residential, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$google_residential, digits = 1), scientific=F, big.mark=","),"%"), NA))) %>%
+  mutate(google_residential = factor(google_residential, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$google_residential, digits = 1), scientific=F, big.mark=","),"%"), paste0(">",prettyNum(round(covariateCutpoints$google_residential, digits = 1), scientific=F, big.mark=","),"%")))) %>%
+  mutate(sdi_score = ifelse(sdi_score > round(covariateCutpoints$sdi_score, digits = 1), paste0(">",prettyNum(round(covariateCutpoints$sdi_score, digits = 1), scientific=F, big.mark=",")), ifelse(sdi_score <= round(covariateCutpoints$sdi_score, digits = 1),paste0("≤",prettyNum(round(covariateCutpoints$sdi_score, digits = 1), scientific=F, big.mark=",")), NA))) %>%
+  mutate(sdi_score = factor(sdi_score, levels = c(paste0("≤",prettyNum(round(covariateCutpoints$sdi_score, digits = 1), scientific=F, big.mark=",")), paste0(">",prettyNum(round(covariateCutpoints$sdi_score, digits = 1), scientific=F, big.mark=",")))))
+```
+
+### Now run MICE for imputation -- all features
+
+```{r}
+# First, run the mice code with 0 iterations 
+dtIMP <- mice(dtFilterIMP, maxit=0)
+
+# Extract predictorMatrix and methods of imputation 
+predM = dtIMP$predictorMatrix
+meth = dtIMP$method
+
+# With this command, we tell mice to impute the dtFilterIMP data
+imp2 <- parlmice(dtFilterIMP, m = 20, maxit = 20, cluster.seed = 28382, n.core = 5, n.imp.core = 2,  cl.type = "FORK", method = meth, predictorMatrix = predM, print =  FALSE)
+
+# MICE runs m parallel chains, each with a certain number of iterations, and imputes values from the final iteration. How many iterations does mice() use and how can we make sure that
+# To monitor convergence we can use trace plots, which plot estimates against the number of iteration.
+plot(imp2)
+# shows mean and standard deviation of the variables through the iterations for the m imputed datasets. An indicator of convergence is how well the m parallel chains mix. 
+
+# Stepwise model selection following: https://stefvanbuuren.name/fimd/sec-stepwise.html
+# This code fits a stepwise linear model to predict COVID+ separately to each of the imputed datasets.
+scope <- list(upper = ~ Site + CVDate + Age + Sex + Race + Ethnicity + PPI + H2RA + Reflux + MI + HF + VD + Stroke + Dementia +
+                COPD + CTD + Ulcer + LiverDisease + Diabetes + Hemiplegia + SevereCKD + Tumor + Leukemia + Lymphoma + AIDS + Hypertension +
+                Asthma + HIV + CKD + BMI + IBD + Autoimmune + Cancer + Opioid + Immunocompromised + Smoker + EtOH + Healthcare + Apartment +
+                CCI + AcidSuppression + MedianIncome + PublicTransportation + WalkToWork + PopulationDensity + HousingDensity + PercLowRiskFactors +
+                PercModerateRiskFactors + PercHighRiskFactors + mask_never + mask_rarely + mask_sometimes + mask_frequently + mask_always +
+                google_retail + google_grocery + google_parks + google_transit + google_workplaces + google_residential + sdi_score, lower = ~1)
+expr <- expression(f1 <- lm(COVID ~ 1),
+                   f2 <- step(f1, scope = scope))
+fit <- with(imp2, expr)
+
+# The following code blocks counts how many times each variable was selected.
+# The lapply() function is used three times. The first statement extracts the model formulas fitted to the "m" imputed datasets. 
+# The second lapply() call decomposes the model formulas into pieces, and the third call extracts the names of the variables included in all "m"
+# models. The table() function counts the number of times that each variable in the 10 replications.
+formulas <- lapply(fit$analyses, formula)
+terms <- lapply(formulas, terms)
+votes <- unlist(lapply(terms, labels))
+sort(table(votes), decreasing = T)
+
+# Variables COPD, Diabetes, Ethnicity, H2RA, IBD, Immunocompromised, Race, and Stroke are always included. Check variables that got 5 or more votes and see
+# if they are significant
+
+# Try Opioid - p.value = 0.1203041 (don't add this into the model)
+fit.without <- with(imp2, lm(COVID ~ COPD + Diabetes + Ethnicity + H2RA + IBD + Immunocompromised + Race + Stroke))
+fit.with <- with(imp2, lm(COVID ~ COPD + Diabetes + Ethnicity + H2RA + IBD + Immunocompromised + Race + Stroke + Opioid))
+D1(fit.with, fit.without)
+
+# Try Tumor - p.value = 0.1343142 (don't add this into the model)
+fit.without <- with(imp2, lm(COVID ~ COPD + Diabetes + Ethnicity + H2RA + IBD + Immunocompromised + Race + Stroke))
+fit.with <- with(imp2, lm(COVID ~ COPD + Diabetes + Ethnicity + H2RA + IBD + Immunocompromised + Race + Stroke + Tumor))
+D1(fit.with, fit.without)
+```
+
+### Test if heterogeneity is attributable to site
+```{r}
+dtFilterIMP %>%
+  group_by(Site) %>%
+  summarise(CaseExposure = sum(PPI==1 & COVID==1,na.rm = T),
+            CaseN = sum(!is.na(PPI) & COVID==1,na.rm = T),
+            ControlExposure = sum(PPI==1 & COVID==0,na.rm = T),
+            ControlN = sum(!is.na(PPI) & COVID==0,na.rm = T)) %>%
+  select(Site, CaseExposure, CaseN, ControlExposure, ControlN) %>%
+  meta::metabin(event.e = CaseExposure,
+                n.e = CaseN,
+                event.c = ControlExposure,
+                n.c = ControlN,
+                studlab = Site,
+                comb.fixed = FALSE,
+                comb.random = TRUE,
+                method.tau = "SJ",
+                hakn = TRUE,
+                prediction = TRUE,
+                incr = 0.1,
+                sm = "OR")
+```
+
+
+### Forest Plot 1 - reduced model from feature selection -- all features
+```{r}
+# Run regression of the reduced model
+reducedModel <- with(imp2, lm(COVID ~ COPD + Diabetes + Ethnicity + H2RA + IBD + Immunocompromised + Race + Stroke))
+
+# Get the point estimate, CI, and p-values
+modelOutput <- summary(pool(reducedModel), conf.int = TRUE, exponentiate = TRUE)
+
+# Rename the factors
+modelOutput <- modelOutput %>%
+  mutate(term = recode(term, "COPD" = "COPD", "Diabetes" = "Diabetes Mellitus", "EthnicityLatinx" = "Ethnicity", 
+                       "H2RA" = "H2RA Use", "IBD" = "Irritable Bowl Disease", "Immunocompromised" = "Immunocompromised",
+                       "RaceAsian" = "Asian", "RaceBlack" = "Black", "RaceOther" = "Other", "Stoke" = "Stroke"))
+
+# Set the order for what we are plotting
+modelOutput <- modelOutput[-1,] #remove the intercept
+rownames(modelOutput) <- as.character(modelOutput[,1]) # Set rownames to the factors
+modelOutput <- modelOutput[c("Asian", "Black", "Other", "Ethnicity", "H2RA Use", "Irritable Bowl Disease", "Diabetes Mellitus", "Stroke", "COPD", "Immunocompromised"),] # Set the order
+
+groupLabels <- c("Subgroup", "\n", "Overall", "\n", 
+                 "Race", "White", "Asian", "Black", "Other", "\n", # Race
+                 "Ethnicity", "Not Latinx", "Latinx", "\n", # Ethnicity
+                 "H2RA Use", "No", "Yes", "\n", #H2RA
+                 "Irritable Bowl Disease", "No", "Yes", "\n", #IBD
+                 "Diabetes Mellitus", "No", "Yes", "\n", #Diabetes
+                 "Stroke", "No", "Yes", "\n", #Stroke
+                 "COPD", "No", "Yes", "\n", #COPD
+                 "Immunocompromised", "No", "Yes" #Immunocompromised
+)
+
+numPercentage <- c("No. of Patients (%)", "\n",
+                   paste0(nrow(dtFilterIMP), " (100)%"), "\n", # Overall
+"\n", paste0(length(which(dtFilterIMP$Race == "White")), " (", round(100*length(which(dtFilterIMP$Race == "White"))/nrow(dtFilterIMP),digits = 1), "%)"), #Race-White
+paste0(length(which(dtFilterIMP$Race == "Asian")), " (", round(100*length(which(dtFilterIMP$Race == "Asian"))/nrow(dtFilterIMP),digits = 1), "%)"), #Race-Asian
+paste0(length(which(dtFilterIMP$Race == "Black")), " (", round(100*length(which(dtFilterIMP$Race == "Black"))/nrow(dtFilterIMP),digits = 1), "%)"), #Race-Black
+paste0(length(which(dtFilterIMP$Race == "Other")), " (", round(100*length(which(dtFilterIMP$Race == "Other"))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #Race-Other
+"\n", paste0(length(which(dtFilterIMP$Ethnicity == "Not Latinx")), " (", round(100*length(which(dtFilterIMP$Ethnicity == "Not Latinx"))/nrow(dtFilterIMP),digits = 1), "%)"), #Ethnicity-Not Latinx
+paste0(length(which(dtFilterIMP$Ethnicity == "Latinx")), " (", round(100*length(which(dtFilterIMP$Ethnicity == "Latinx"))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #Ethnicity-Latinx
+"\n", paste0(length(which(dtFilterIMP$H2RA == 0)), " (", round(100*length(which(dtFilterIMP$H2RA == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #H2RA-No
+paste0(length(which(dtFilterIMP$H2RA == 1)), " (", round(100*length(which(dtFilterIMP$H2RA == 1))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #H2RA-Yes
+"\n", paste0(length(which(dtFilterIMP$IBD == 0)), " (", round(100*length(which(dtFilterIMP$IBD == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #IBD-No
+paste0(length(which(dtFilterIMP$IBD == 1)), " (", round(100*length(which(dtFilterIMP$IBD == 1))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #IBD-Yes
+"\n", paste0(length(which(dtFilterIMP$Diabetes == 0)), " (", round(100*length(which(dtFilterIMP$Diabetes == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #Diabetes-No
+paste0(length(which(dtFilterIMP$Diabetes == 1)), " (", round(100*length(which(dtFilterIMP$Diabetes == 1))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #Diabetes-Yes
+"\n", paste0(length(which(dtFilterIMP$Stroke == 0)), " (", round(100*length(which(dtFilterIMP$Stroke == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #Stroke-No
+paste0(length(which(dtFilterIMP$Stroke == 1)), " (", round(100*length(which(dtFilterIMP$Stroke == 1))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #Stroke-Yes
+"\n", paste0(length(which(dtFilterIMP$COPD == 0)), " (", round(100*length(which(dtFilterIMP$COPD == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #COPD-No
+paste0(length(which(dtFilterIMP$COPD == 1)), " (", round(100*length(which(dtFilterIMP$COPD == 1))/nrow(dtFilterIMP),digits = 1), "%)"), "\n", #COPD-Yes
+"\n", paste0(length(which(dtFilterIMP$Immunocompromised == 0)), " (", round(100*length(which(dtFilterIMP$Immunocompromised == 0))/nrow(dtFilterIMP),digits = 1), "%)"), #Immunocompromised-No
+paste0(length(which(dtFilterIMP$Immunocompromised == 1)), " (", round(100*length(which(dtFilterIMP$Immunocompromised == 1))/nrow(dtFilterIMP),digits = 1), "%)") #Immunocompromised-Yes
+                   )
+
+oddsRatio <- c("Odds Ratio", rep(NA,3), 
+                   NA, "ref", paste0(round(modelOutput$estimate[1:3], digits = 2), " (",round(modelOutput$`2.5 %`[1:3], digits = 2),"-",round(modelOutput$`97.5 %`[1:3], digits = 2),")"), NA, #Race
+                   NA, "ref", paste0(round(modelOutput$estimate[4], digits = 2), " (",round(modelOutput$`2.5 %`[4], digits = 2),"-",round(modelOutput$`97.5 %`[4], digits = 2),")"), NA, #Ethnicity
+                   NA, "ref", paste0(round(modelOutput$estimate[5], digits = 2), " (",round(modelOutput$`2.5 %`[5], digits = 2),"-",round(modelOutput$`97.5 %`[5], digits = 2),")"), NA, #H2RA
+                   NA, "ref", paste0(round(modelOutput$estimate[6], digits = 2), " (",round(modelOutput$`2.5 %`[6], digits = 2),"-",round(modelOutput$`97.5 %`[6], digits = 2),")"), NA, #IBD
+                   NA, "ref", paste0(round(modelOutput$estimate[7], digits = 2), " (",round(modelOutput$`2.5 %`[7], digits = 2),"-",round(modelOutput$`97.5 %`[7], digits = 2),")"), NA, #Diabetes
+                   NA, "ref", paste0(round(modelOutput$estimate[8], digits = 2), " (",round(modelOutput$`2.5 %`[8], digits = 2),"-",round(modelOutput$`97.5 %`[8], digits = 2),")"), NA, #Stroke
+                   NA, "ref", paste0(round(modelOutput$estimate[9], digits = 2), " (",round(modelOutput$`2.5 %`[9], digits = 2),"-",round(modelOutput$`97.5 %`[9], digits = 2),")"), NA, #COPD
+                   NA, "ref", paste0(round(modelOutput$estimate[10], digits = 2), " (",round(modelOutput$`2.5 %`[10], digits = 2),"-",round(modelOutput$`97.5 %`[10], digits = 2),")") #Immunocompromised
+               ) 
+
+
+pValue <- c("P Value", rep(NA,3),
+            NA, "ref", signif(modelOutput$p.value[1:3],digits = 3), NA, #Race
+            NA, "ref", signif(modelOutput$p.value[4],digits = 3), NA, #Ethnicity
+            NA, "ref", signif(modelOutput$p.value[5],digits = 3), NA, #H2RA
+            NA, "ref", signif(modelOutput$p.value[6],digits = 3), NA, #IBD
+            NA, "ref", signif(modelOutput$p.value[7],digits = 3), NA, #Diabetes
+            NA, "ref", signif(modelOutput$p.value[8],digits = 3), NA, #Stroke
+            NA, "ref", signif(modelOutput$p.value[9],digits = 3), NA, #COPD
+            NA, "ref", signif(modelOutput$p.value[10],digits = 3) #Immunocompromised
+            )
+
+pointEstimate <- c(rep(NA,4), 
+                   NA, 1, modelOutput$estimate[1:3], NA, #Race
+                   NA, 1, modelOutput$estimate[4], NA, #Ethnicity
+                   NA, 1, modelOutput$estimate[5], NA, #H2RA
+                   NA, 1, modelOutput$estimate[6], NA, #IBD
+                   NA, 1, modelOutput$estimate[7], NA, #Diabetes
+                   NA, 1, modelOutput$estimate[8], NA, #Stroke
+                   NA, 1, modelOutput$estimate[9], NA, #COPD
+                   NA, 1, modelOutput$estimate[10] #Immunocompromised
+                   )
+
+upperCI <- c(rep(NA,4), 
+                   NA, 1, modelOutput$`2.5 %`[1:3], NA, #Race
+                   NA, 1, modelOutput$`2.5 %`[4], NA, #Ethnicity
+                   NA, 1, modelOutput$`2.5 %`[5], NA, #H2RA
+                   NA, 1, modelOutput$`2.5 %`[6], NA, #IBD
+                   NA, 1, modelOutput$`2.5 %`[7], NA, #Diabetes
+                   NA, 1, modelOutput$`2.5 %`[8], NA, #Stroke
+                   NA, 1, modelOutput$`2.5 %`[9], NA, #COPD
+                   NA, 1, modelOutput$`2.5 %`[10] #Immunocompromised
+                   )
+lowerCI <- c(rep(NA,4), 
+                   NA, 1, modelOutput$`97.5 %`[1:3], NA, #Race
+                   NA, 1, modelOutput$`97.5 %`[4], NA, #Ethnicity
+                   NA, 1, modelOutput$`97.5 %`[5], NA, #H2RA
+                   NA, 1, modelOutput$`97.5 %`[6], NA, #IBD
+                   NA, 1, modelOutput$`97.5 %`[7], NA, #Diabetes
+                   NA, 1, modelOutput$`97.5 %`[8], NA, #Stroke
+                   NA, 1, modelOutput$`97.5 %`[9], NA, #COPD
+                   NA, 1, modelOutput$`97.5 %`[10] #Immunocompromised
+)
+
+# Add leading spaces
+indicesUse <- c(6:9, 12:13, 16:17, 20:21, 24:25, 28:29, 32:33, 36:37)
+groupLabels[indicesUse] <- paste0("  ",groupLabels[indicesUse])
+
+# Forest Plot
+pdf(file = "./Plots/SampleDataForestPlot.pdf", width = 15, height = 10, onefile = F)
+forestplot::forestplot(
+  labeltext = list(groupLabels, numPercentage, oddsRatio, pValue),
+  graph.pos = 4,
+  mean = pointEstimate, 
+  lower = upperCI, 
+  upper = lowerCI,
+  title = "Odds Ratio",
+  xlab = " <-- COVID+ Protective ---    --- Increases COVID+ Risk --->",
+  hrzl_lines = list("2" = grid::gpar(lwd = 2, col = "#99999922"), 
+                     "8" = grid::gpar(lwd = 130, lineend = "butt", columns = c(2:5), col = "#99999922"),
+                     "17" = grid::gpar(lwd = 80, lineend = "butt", columns = c(2:5), col = "#99999922"),
+                     "25" = grid::gpar(lwd = 80, lineend = "butt", columns = c(2:5), col = "#99999922"),
+                     "33" = grid::gpar(lwd = 80, lineend = "butt", columns = c(2:5), col = "#99999922")),
+  txt_gp = forestplot::fpTxtGp(label = grid::gpar(cex = 1.25),
+                                ticks = grid::gpar(cex = 1.1),
+                                xlab = grid::gpar(cex = 1.2),
+                                title = grid::gpar(cex = 1.2)),
+  col = forestplot::fpColors(box = "black", lines = "black", zero = "gray50"),
+  zero = 1, cex = 0.9, lineheight = "auto", boxsize = 0.5, colgap = unit(6,"mm"),
+  lwd.ci = 2, ci.vertices = TRUE, ci.vertices.height = 0.4, xlog = TRUE
+  )
+dev.off()
+```
+
+### Table 1 -- stratify by site
+
+```{r}
+
+tableoneData <- dtFilterIMP %>%
+  mutate(COVID = ifelse(COVID == 1, "Positive", "Negative")) %>%
+  mutate(COVID = as.factor(COVID)) %>%
+  mutate(COVID = droplevels(COVID, "Negative", "")) %>%
+  mutate(CVDate = factor(CVDate, levels = c("Mar", "Apr", "May", "Jun"))) %>% # Set the order of the factor so we can have march as the reference
+  mutate(Sex = droplevels(Sex, "Male", "")) %>%
+  mutate(Ethnicity = droplevels(Ethnicity, "Not Latinx", "")) %>%
+  mutate(PPI = ifelse(PPI == 1, "Yes", "No")) %>%
+  mutate(PPI = as.factor(PPI)) %>%
+  mutate(PPI = droplevels(PPI, "No", "")) %>%
+  mutate(AcidSuppression = ifelse(AcidSuppression == 1, "Yes", "No")) %>%
+  mutate(AcidSuppression = as.factor(AcidSuppression)) %>%
+  mutate(AcidSuppression = droplevels(AcidSuppression, "No", "")) %>%
+  mutate(CCI = factor(CCI, levels = c("0-2: Mild", "3-4: Moderate", "≥5: Severe"))) %>%
+  mutate(Reflux = ifelse(Reflux == 1, "Yes", "No")) %>% # Change incidence of reflux from numeric encoding
+  mutate(Reflux = as.factor(Reflux)) %>%
+  mutate(Reflux = droplevels(Reflux, "No", "")) %>%
+  mutate(HF = ifelse(HF == 1, "Yes", "No")) %>% # Change incidence of heart failure from numeric encoding
+  mutate(HF = as.factor(HF)) %>%
+  mutate(HF = droplevels(HF, "No", "")) %>%
+  mutate(Stroke = ifelse(Stroke == 1, "Yes", "No")) %>% # Change incidence of stroke from numeric encoding
+  mutate(Stroke = as.factor(Stroke)) %>%
+  mutate(Stroke = droplevels(Stroke, "No", "")) %>%
+  mutate(Dementia = ifelse(Dementia == 1, "Yes", "No")) %>% # Change incidence of stroke from numeric encoding
+  mutate(Dementia = as.factor(Dementia)) %>%
+  mutate(Dementia = droplevels(Dementia, "No", "")) %>%
+  mutate(Diabetes = ifelse(Diabetes == 1, "Yes", "No")) %>% # Change incidence of diabetes from numeric encoding
+  mutate(Diabetes = as.factor(Diabetes)) %>%
+  mutate(Diabetes = droplevels(Diabetes, "No", "")) %>%
+  mutate(SevereCKD = ifelse(SevereCKD == 1, "Yes", "No")) %>% # Change incidence of severe CKD from numeric encoding
+  mutate(SevereCKD = as.factor(SevereCKD)) %>%
+  mutate(SevereCKD = droplevels(SevereCKD, "No", "")) %>%
+  mutate(Tumor = ifelse(Tumor == 1, "Yes", "No")) %>% # Change incidence of solid tumor from numeric encoding
+  mutate(Tumor = as.factor(Tumor)) %>%
+  mutate(Tumor = droplevels(Tumor, "No", "")) %>%
+  mutate(AIDS = ifelse(AIDS == 1, "Yes", "No")) %>% # Change incidence of AIDS from numeric encoding
+  mutate(AIDS = as.factor(AIDS)) %>%
+  mutate(AIDS = droplevels(AIDS, "No", "")) %>%
+  mutate(HIV = ifelse(HIV == 1, "Yes", "No")) %>% # Change incidence of HIV from numeric encoding
+  mutate(HIV = as.factor(HIV)) %>%
+  mutate(HIV = droplevels(HIV, "No", "")) %>%
+  mutate(Immunocompromised = ifelse(Immunocompromised == 1, "Yes", "No")) %>% # Change incidence of Immunocompromised from numeric encoding
+  mutate(Immunocompromised = as.factor(Immunocompromised)) %>%
+  mutate(Immunocompromised = droplevels(Immunocompromised, "No", "")) %>%
+  mutate(Autoimmune = ifelse(Autoimmune == 1, "Yes", "No")) %>% # Change incidence of Autoimmune from numeric encoding
+  mutate(Autoimmune = as.factor(Autoimmune)) %>%
+  mutate(Autoimmune = droplevels(Autoimmune, "No", "")) %>%
+  mutate(Opioid = ifelse(Opioid == 1, "Yes", "No")) %>% # Change incidence of chronic opiate use from numeric encoding
+  mutate(Opioid = as.factor(Opioid)) %>%
+  mutate(Opioid = droplevels(Opioid, "No", "")) %>%
+  mutate(EtOH = ifelse(EtOH == 1, "Yes", "No")) %>% # Change incidence of EtOH use disorder from numeric encoding
+  mutate(EtOH = as.factor(EtOH)) %>%
+  mutate(EtOH = droplevels(EtOH, "No", "")) %>%
+  mutate(Healthcare = ifelse(Healthcare == 1, "Yes", "No")) %>% # Change incidence of healthcare worker from numeric encoding
+  mutate(Healthcare = as.factor(Healthcare)) %>%
+  mutate(Healthcare = droplevels(Healthcare, "No", "")) %>%
+  mutate(Apartment = recode(Apartment, "Apt" = "Apartment", "Cruise" = "Cruise", "Homeless" = "Homeless", "SingleFamilyHome" = "Single Family Home", "SNF" = "SNF")) %>% # Update categories for the apartment name
+  mutate(Apartment = as.factor(Apartment)) %>% # Change Apartment to factor
+  mutate(Apartment = factor(Apartment, levels = c("Single Family Home", "Apartment", "SNF", "Homeless", "Cruise"))) %>%
+  mutate(sdi_score = droplevels(sdi_score, "≤65", "")) %>%
+  mutate(median_percentage_time_home = droplevels(median_percentage_time_home, "≤85.0%", "")) %>%
+  mutate(PublicTransportation = droplevels(PublicTransportation, "≤4.4%", ""))
+
+  
+my.render.cont <- function(x) {
+    with(stats.apply.rounding(stats.default(x), digits=3), c("",
+        "Mean"=sprintf("%s&plusmn;%s", MEAN, SD)))
+}
+
+label(tableoneData$COVID) <- "SARS-CoV2 test result"
+label(tableoneData$CVDate) <- "SARS-CoV2 test month"
+label(tableoneData$Sex) <- "Female sex"
+label(tableoneData$Age) <- "Age - yr"
+label(tableoneData$Race) <- "Race or ethnic group"
+label(tableoneData$Ethnicity) <- "Ethnicity Latinx"
+label(tableoneData$PPI) <- "PPI use"
+label(tableoneData$AcidSuppression) <- "Acid Suppression use"
+label(tableoneData$CCI) <- "Charlson Comorbidity Index"
+label(tableoneData$Reflux) <- "GERD"
+label(tableoneData$HF) <- "Heart Failure"
+label(tableoneData$Stroke) <- "Stroke"
+label(tableoneData$Diabetes) <- "Diabetes"
+label(tableoneData$SevereCKD) <- "Severe CKD"
+label(tableoneData$Tumor) <- "Solid tumor"
+label(tableoneData$AIDS) <- "AIDS"
+label(tableoneData$HIV) <- "HIV"
+label(tableoneData$Immunocompromised) <- "Immunocompromised"
+label(tableoneData$Autoimmune) <- "Autoimmune disease"
+label(tableoneData$Opioid) <- "Chronic opiate use"
+label(tableoneData$EtOH) <- "EtOH use disorder"
+label(tableoneData$Healthcare) <- "Healthcare worker"
+label(tableoneData$Apartment) <- "Residence"
+label(tableoneData$sdi_score) <- "Social Deprivation Index"
+label(tableoneData$median_percentage_time_home) <- "Time spent home"
+label(tableoneData$PublicTransportation) <- "Public transportation usage"
+
+table1(~ COVID + CVDate + Sex + Age + Race + Ethnicity + BMI + PPI + AcidSuppression + CCI + Reflux + HF + Stroke + Dementia + Diabetes + SevereCKD + Tumor + AIDS
+       + HIV + Immunocompromised + Autoimmune + Opioid + EtOH + Healthcare + Apartment + sdi_score + median_percentage_time_home + PublicTransportation | Site, 
+       data = tableoneData,
+       render.missing = NULL,
+       render.continuous = my.render.cont,
+       topclass="Rtable1-zebra")
+```
+
+### Table 1 -- stratified by PPI
+
+```{r}
+tableoneData <- dtFilterIMP %>%
+  mutate(COVID = ifelse(COVID == 1, "Positive", "Negative")) %>%
+  mutate(COVID = as.factor(COVID)) %>%
+  mutate(COVID = droplevels(COVID, "Negative", "")) %>%
+  mutate(CVDate = factor(CVDate, levels = c("Mar", "Apr", "May", "Jun"))) %>% # Set the order of the factor so we can have march as the reference
+  mutate(Sex = droplevels(Sex, "Male", "")) %>%
+  mutate(Ethnicity = droplevels(Ethnicity, "Not Latinx", "")) %>%
+  mutate(PPI = ifelse(PPI == 1, "Yes", "No")) %>%
+  mutate(PPI = as.factor(PPI)) %>%
+  mutate(PPI = droplevels(PPI, "No", "")) %>%
+  mutate(AcidSuppression = ifelse(AcidSuppression == 1, "Yes", "No")) %>%
+  mutate(AcidSuppression = as.factor(AcidSuppression)) %>%
+  mutate(AcidSuppression = droplevels(AcidSuppression, "No", "")) %>%
+  mutate(CCI = factor(CCI, levels = c("0-2: Mild", "3-4: Moderate", "≥5: Severe"))) %>%
+  mutate(Reflux = ifelse(Reflux == 1, "Yes", "No")) %>% # Change incidence of reflux from numeric encoding
+  mutate(Reflux = as.factor(Reflux)) %>%
+  mutate(Reflux = droplevels(Reflux, "No", "")) %>%
+  mutate(HF = ifelse(HF == 1, "Yes", "No")) %>% # Change incidence of heart failure from numeric encoding
+  mutate(HF = as.factor(HF)) %>%
+  mutate(HF = droplevels(HF, "No", "")) %>%
+  mutate(Stroke = ifelse(Stroke == 1, "Yes", "No")) %>% # Change incidence of stroke from numeric encoding
+  mutate(Stroke = as.factor(Stroke)) %>%
+  mutate(Stroke = droplevels(Stroke, "No", "")) %>%
+  mutate(Dementia = ifelse(Dementia == 1, "Yes", "No")) %>% # Change incidence of stroke from numeric encoding
+  mutate(Dementia = as.factor(Dementia)) %>%
+  mutate(Dementia = droplevels(Dementia, "No", "")) %>%
+  mutate(Diabetes = ifelse(Diabetes == 1, "Yes", "No")) %>% # Change incidence of diabetes from numeric encoding
+  mutate(Diabetes = as.factor(Diabetes)) %>%
+  mutate(Diabetes = droplevels(Diabetes, "No", "")) %>%
+  mutate(SevereCKD = ifelse(SevereCKD == 1, "Yes", "No")) %>% # Change incidence of severe CKD from numeric encoding
+  mutate(SevereCKD = as.factor(SevereCKD)) %>%
+  mutate(SevereCKD = droplevels(SevereCKD, "No", "")) %>%
+  mutate(Tumor = ifelse(Tumor == 1, "Yes", "No")) %>% # Change incidence of solid tumor from numeric encoding
+  mutate(Tumor = as.factor(Tumor)) %>%
+  mutate(Tumor = droplevels(Tumor, "No", "")) %>%
+  mutate(AIDS = ifelse(AIDS == 1, "Yes", "No")) %>% # Change incidence of AIDS from numeric encoding
+  mutate(AIDS = as.factor(AIDS)) %>%
+  mutate(AIDS = droplevels(AIDS, "No", "")) %>%
+  mutate(HIV = ifelse(HIV == 1, "Yes", "No")) %>% # Change incidence of HIV from numeric encoding
+  mutate(HIV = as.factor(HIV)) %>%
+  mutate(HIV = droplevels(HIV, "No", "")) %>%
+  mutate(Immunocompromised = ifelse(Immunocompromised == 1, "Yes", "No")) %>% # Change incidence of Immunocompromised from numeric encoding
+  mutate(Immunocompromised = as.factor(Immunocompromised)) %>%
+  mutate(Immunocompromised = droplevels(Immunocompromised, "No", "")) %>%
+  mutate(Autoimmune = ifelse(Autoimmune == 1, "Yes", "No")) %>% # Change incidence of Autoimmune from numeric encoding
+  mutate(Autoimmune = as.factor(Autoimmune)) %>%
+  mutate(Autoimmune = droplevels(Autoimmune, "No", "")) %>%
+  mutate(Opioid = ifelse(Opioid == 1, "Yes", "No")) %>% # Change incidence of chronic opiate use from numeric encoding
+  mutate(Opioid = as.factor(Opioid)) %>%
+  mutate(Opioid = droplevels(Opioid, "No", "")) %>%
+  mutate(EtOH = ifelse(EtOH == 1, "Yes", "No")) %>% # Change incidence of EtOH use disorder from numeric encoding
+  mutate(EtOH = as.factor(EtOH)) %>%
+  mutate(EtOH = droplevels(EtOH, "No", "")) %>%
+  mutate(Healthcare = ifelse(Healthcare == 1, "Yes", "No")) %>% # Change incidence of healthcare worker from numeric encoding
+  mutate(Healthcare = as.factor(Healthcare)) %>%
+  mutate(Healthcare = droplevels(Healthcare, "No", "")) %>%
+  mutate(Apartment = recode(Apartment, "Apt" = "Apartment", "Cruise" = "Cruise", "Homeless" = "Homeless", "SingleFamilyHome" = "Single Family Home", "SNF" = "SNF")) %>% # Update categories for the apartment name
+  mutate(Apartment = as.factor(Apartment)) %>% # Change Apartment to factor
+  mutate(Apartment = factor(Apartment, levels = c("Single Family Home", "Apartment", "SNF", "Homeless", "Cruise"))) %>%
+  mutate(sdi_score = droplevels(sdi_score, "≤65", "")) %>%
+  mutate(median_percentage_time_home = droplevels(median_percentage_time_home, "≤85.0%", "")) %>%
+  mutate(PublicTransportation = droplevels(PublicTransportation, "≤4.4%", ""))
+
+  
+my.render.cont <- function(x) {
+    with(stats.apply.rounding(stats.default(x), digits=3), c("",
+        "Mean"=sprintf("%s&plusmn;%s", MEAN, SD)))
+}
+
+label(tableoneData$COVID) <- "SARS-CoV2 test result"
+label(tableoneData$CVDate) <- "SARS-CoV2 test month"
+label(tableoneData$Sex) <- "Female sex"
+label(tableoneData$Age) <- "Age - yr"
+label(tableoneData$Race) <- "Race or ethnic group"
+label(tableoneData$Ethnicity) <- "Ethnicity Latinx"
+label(tableoneData$PPI) <- "PPI use"
+label(tableoneData$AcidSuppression) <- "Acid Suppression use"
+label(tableoneData$CCI) <- "Charlson Comorbidity Index"
+label(tableoneData$Reflux) <- "GERD"
+label(tableoneData$HF) <- "Heart Failure"
+label(tableoneData$Stroke) <- "Stroke"
+label(tableoneData$Diabetes) <- "Diabetes"
+label(tableoneData$SevereCKD) <- "Severe CKD"
+label(tableoneData$Tumor) <- "Solid tumor"
+label(tableoneData$AIDS) <- "AIDS"
+label(tableoneData$HIV) <- "HIV"
+label(tableoneData$Immunocompromised) <- "Immunocompromised"
+label(tableoneData$Autoimmune) <- "Autoimmune disease"
+label(tableoneData$Opioid) <- "Chronic opiate use"
+label(tableoneData$EtOH) <- "EtOH use disorder"
+label(tableoneData$Healthcare) <- "Healthcare worker"
+label(tableoneData$Apartment) <- "Residence"
+label(tableoneData$sdi_score) <- "Social Deprivation Index"
+label(tableoneData$median_percentage_time_home) <- "Time spent home"
+label(tableoneData$PublicTransportation) <- "Public transportation usage"
+
+table1(~ COVID + Site + CVDate + Sex + Age + Race + Ethnicity + BMI + CCI + Reflux + HF + Stroke + Dementia + Diabetes + SevereCKD + Tumor + AIDS
+       + HIV + Immunocompromised + Autoimmune + Opioid + EtOH + Healthcare + Apartment + sdi_score + median_percentage_time_home + PublicTransportation | AcidSuppression, 
+       data = tableoneData,
+       render.missing = NULL,
+       render.continuous = my.render.cont,
+       topclass="Rtable1-zebra")
+```

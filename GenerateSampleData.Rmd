@@ -1,1 +1,246 @@
-test
+---
+title: "COVID19 PPI Generate Sample Data v1"
+author: "DA + VR + COVIDPPI team"
+date: "12/14/2020"
+output:
+#  pdf_document: default
+#  html_notebook: default
+---
+### Description
+Here, we generate random sample data to demonstrate the workflow of our analysis to investigate how the use of proton pump inhibitors affects the risk of COVID-19 infection.
+
+### Load packages and set working directory
+
+```{r setup, message=FALSE, warning=FALSE}
+# Load packages
+library(tidyverse)
+library(openxlsx)
+
+# Set the seed
+set.seed(42)
+
+# Set working directory
+pathUse <- "/Users/douglasarneson/Documents/ButteLab/CovidPPIstudyVivek/FirstStudy/Analysis/DougResultsV1"
+setwd(pathUse)
+```
+
+```{r sampleCovariates, message=FALSE, warning=FALSE}
+# Number of individuals to generate data for
+numPatients <- 871
+
+# Randomly sample each of the covariates and outcome (COVID-19 Dx) based on the overall prevalence in the cohort
+siteSample <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.34, 0.34, 0.32)) # Location of the COVID test
+patientID <- seq(1,numPatients) # Give each patient a unique ID
+covidDx <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.5, 0.5)) # Results of the COVID test
+covidTestDate <- sample(x = seq.Date(from = as.Date("2020-03-02"),to = as.Date("2020-06-21 UTC"), by = "day"), size = numPatients, replace = T) # Randomly sample dates from min and max test dates from our data
+age <- sample(x = seq(18,90), size = numPatients, replace = T) # Randomly sample ages from 18 to 90
+sex <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.46, 0.54)) # Patient sexes
+race <- sample(x = c(0,1,2,3,4), size = numPatients, replace = T, prob = c(0.64, 0.14, 0.08, 0.01, 0.13)) # Patient race (here they could list multiple races, which were corrected in CorrectedRace by setting multiple races to "Other"). Now we just set race and correctedRace to the same thing
+correctedRace <- race
+ethnicity <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.76, 0.24)) # Patient ethnicity
+# Sample from a random set of 8 San Francisco Zip Codes, 8 Los Angeles Zip Codes, 8 San Diego Zip Codes, 3 Irvine Zip Codes, 8 Oakland Zip Codes,
+# 6 Fresno Zip Codes, 7 Riverside Zip Codes, and 7 Long Beach Zip Codes
+allZips <- c("94127", "94128", "94129", "94130", "94131", "94132", "94133", "94134", # San Francisco
+             "92101", "92102", "92103", "92104", "92105", "92106", "92107", "92108", # San Diego
+             "90001", "90002", "90003", "90004", "90005", "90006", "90007", "90008", # Los Angeles
+             "92602", "92603", "92604", # Irvine
+             "94605", "94606", "94607", "94608", "94609", "94610", "94611", "94612", # Oakland
+             "93701", "93702", "93703", "93704", "93705", "93706", # Fresno
+             "92503", "92504", "92505", "92506", "92507", "92508", "92509", # Riverside
+             "90802", "90803", "90804", "90805", "90806", "90807", "90808") # Long Beach
+             
+zipCode <- sample(x = allZips, size = numPatients, replace = T) # Randomly sample all California zip codes
+ppi <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.85, 0.15)) # PPI use
+h2ra <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.96, 0.04)) # H2RA use
+gerd <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.82, 0.18)) # GERD presence
+myocardial <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.96, 0.04)) # MI presence
+heartFailure <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.96, 0.04)) # congestive heart failure presence
+vascularDisease <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.98, 0.02)) # peripheral vascular disease presence
+stroke <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.96, 0.04)) # stroke presence
+dementia <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.97, 0.03)) # dementia presence
+copd <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.97, 0.03)) # copd presence
+connectiveTissue <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.97, 0.03)) # connective tissue disease presence
+ucler <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # peptic ulcer disease presence
+liverDisease <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.96, 0.03, 0.01)) # liver disease presence
+diabetes <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.86, 0.11, 0.03)) # diabetes mellitus presence
+hemiplegia <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # hemiplegia presence
+severeCKD <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.97, 0.03)) # moderate to severe CKD (Cre > 3) presence
+solidTumor <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.91, 0.07, 0.02)) # solid tumor presence
+leukemia <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # leukemia presence
+lymphoma <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # lymphoma presence
+aids <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # AIDS presence
+cci <- sample(x = c(0,1,2,3,4,5,6,8,10,7,9,12), size = numPatients, replace = T, prob = c(0.5, 0.16, 0.09, 0.08, 0.05, 0.04, 0.03, 0.01, 0.01, 0.01, 0.01, 0.01)) # cci score
+hypertension <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.73, 0.27)) # hypertension presence
+asthma <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.92, 0.08)) # asthma presence
+hiv <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.96, 0.03, 0.01)) # hiv presence
+ckd <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.95, 0.05)) # chronic kidney disease (Cre < 3) presence
+bmi <- sample(x = seq(16,41), size = numPatients, replace = T) # Randomly sample BMI from 16 to 41
+ibd  <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.99, 0.01)) # irritable bowel disease presence
+autoimmune <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.94, 0.06)) # autoimmune presence
+cancerHistory <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.88, 0.12)) # history of cancer
+opiateUse <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.94, 0.06)) # chronic opiate use
+immunocompromised <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.78, 0.22)) # immunocompromised (med or comorbidity)
+smoker <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.74, 0.18, 0.08)) # smoker (including marijuana)
+alcoholUseDisorder <- sample(x = c(0,1,2), size = numPatients, replace = T, prob = c(0.96, 0.02, 0.02)) # EtOH use disorder
+healthcare <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.80, 0.20)) # healthcare worker
+groupLiving <- sample(x = c(0,1), size = numPatients, replace = T, prob = c(0.71, 0.29)) # Group living home (SNF / Rehab, etc)
+apartment <- sample(x = c(0,1,2,3,4), size = numPatients, replace = T, prob = c(0.64, 0.31, 0.03, 0.02, 0.00)) # living situation
+
+# Free text elements -- these will be included as N/As
+covidTestComments <- rep(NA,numPatients)
+comments12 <- rep(NA,numPatients)
+ppiType <- rep(NA,numPatients)
+ppiDose <- rep(NA,numPatients)
+ppiFreq <- rep(NA,numPatients)
+ppiDuration <- rep(NA,numPatients)
+ppiComments <- rep(NA,numPatients)
+h2raType <- rep(NA,numPatients)
+h2raDose <- rep(NA,numPatients)
+h2raFreq <- rep(NA,numPatients)
+h2raDuration <- rep(NA,numPatients)
+h2raComments <- rep(NA,numPatients)
+medications <- rep(NA,numPatients)
+comments50 <- rep(NA,numPatients)
+autoimmuneComments <- rep(NA,numPatients)
+cancerComments <- rep(NA,numPatients)
+priorCancerTx <- rep(NA,numPatients)
+currentCancerTx <- rep(NA,numPatients)
+recentAntibioticUse <- rep(NA,numPatients)
+```
+
+```{r generateTibble, message=FALSE, warning=FALSE}
+# Create tibble which we will write to file
+tblWrite <- tibble(`Location (Site)` = siteSample, 
+                   `Patient ID #` = patientID, 
+                   `COVID-19 Dx` = covidDx, 
+                   `COVID-19 Test Comments` = covidTestComments, 
+                   `Date of COVID-19 Test` = covidTestDate, 
+                    Age = age, 
+                    Sex = sex, 
+                    Race = race, 
+                    CorrectedRace = correctedRace,
+                    Ethnicity = ethnicity,
+                   `Residence Zip Code` = zipCode, 
+                    Comments...12 = comments12,
+                    PPI = ppi, 
+                   `PPI Type` = ppiType, 
+                   `PPI Dose (mg)` = ppiDose, 
+                   `PPI Frequency` = ppiFreq, 
+                   `Duration of PPI use (months)` = ppiDuration,
+                   `PPI Comments & Indication` = ppiComments, 
+                    H2RA = h2ra, 
+                   `H2RA Type` = h2raType, 
+                   `H2RA Dose (mg)` = h2raDose, 
+                   `H2RA Frequency` = h2raFreq, 
+                   `Duration of H2RA use (months)` = h2raDuration, 
+                   `H2RA Comments & Indication` = h2raComments,
+                   `GERD/Reflux` = gerd,
+                   `Myocardial Infarction` = myocardial,
+                   `Congestive Heart Failure` = heartFailure, 
+                   `Peripheral Vascular Disease` = vascularDisease, 
+                   `Stroke (CVA or TIA)` = stroke, 
+                    Dementia = dementia, 
+                    COPD = copd,
+                   `Connective Tissue Disease` = connectiveTissue, 
+                   `Peptic Ulcer Disease` = ucler, 
+                   `Liver Disease` = liverDisease, 
+                   `Diabetes Mellitus` = diabetes, 
+                    Hemiplegia = hemiplegia, 
+                   `Moderate to Severe CKD (Cre > 3)` = severeCKD, 
+                   `Solid Tumor` = solidTumor,
+                    Leukemia = leukemia, 
+                    Lymphoma = lymphoma, 
+                    AIDS = aids, 
+                   `CCI Score` = cci, 
+                    Hypertension = hypertension, 
+                    Asthma = asthma, 
+                    HIV = hiv, 
+                   `CKD (Cre < 3)` = ckd, 
+                   `Medications for conditions` = medications, 
+                    BMI = bmi, 
+                    IBD = ibd,
+                    Comments...50 = comments50, 
+                    Autoimmune = autoimmune, 
+                   `Autoimmune comments` = autoimmuneComments,
+                   `Hx Cancer` = cancerHistory, 
+                   `Type of cancer comments` = cancerComments, 
+                   `Prior Ca Tx` = priorCancerTx, 
+                   `Current CaTx` = currentCancerTx, 
+                   `Chronic opiate use` = opiateUse,
+                   `Immunocompromised (by med or comorbidity)` = immunocompromised, 
+                   `Recent ABX Use (< 3 mo) & type` = recentAntibioticUse, 
+                   `Smoker (including marijuana)` = smoker, 
+                   `EtOH use disorder` = alcoholUseDisorder, 
+                   `Healthcare worker` = healthcare,
+                   `Group living home (SNF / Rehab, etc)` = groupLiving,
+                    Apartment = apartment)
+
+tblWrite
+```
+
+```{r addMissing, message=FALSE, warning=FALSE}
+# We had one person under 18 slip through the manual curation -- add in one person below 18
+tblWrite$Age[sample(x = seq(1,numPatients), size = 1)] <- sample(x = seq(1,17), size = 1)
+
+# Four people had missing zip codes -- add in missing zips
+tblWrite$`Residence Zip Code`[sample(x = seq(1,numPatients), size = 4, replace = F)] <- NA
+
+# Add missingness to a number of the variables (similar to what we see in the original data)
+tblWrite$Sex[sample(x = seq(1,numPatients), size = 1, replace = F)] <- NA
+tblWrite$Race[sample(x = seq(1,numPatients), size = 66, replace = F)] <- NA
+tblWrite$Ethnicity[sample(x = seq(1,numPatients), size = 82, replace = F)] <- NA
+tblWrite$PPI[sample(x = seq(1,numPatients), size = 4, replace = F)] <- NA
+tblWrite$H2RA[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`GERD/Reflux`[sample(x = seq(1,numPatients), size = 8, replace = F)] <- NA
+tblWrite$`Myocardial Infarction`[sample(x = seq(1,numPatients), size = 5, replace = F)] <- NA
+tblWrite$`Congestive Heart Failure`[sample(x = seq(1,numPatients), size = 5, replace = F)] <- NA
+tblWrite$`Peripheral Vascular Disease`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Stroke (CVA or TIA)`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$Dementia[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$COPD[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Connective Tissue Disease`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Peptic Ulcer Disease`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Liver Disease`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Diabetes Mellitus`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$Hemiplegia[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Moderate to Severe CKD (Cre > 3)`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Solid Tumor`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Leukemia`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Lymphoma`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`AIDS`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`CCI Score`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Hypertension`[sample(x = seq(1,numPatients), size = 8, replace = F)] <- NA
+tblWrite$`Asthma`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`HIV`[sample(x = seq(1,numPatients), size = 5, replace = F)] <- NA
+tblWrite$`CKD (Cre < 3)`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`BMI`[sample(x = seq(1,numPatients), size = 115, replace = F)] <- NA
+tblWrite$`IBD`[sample(x = seq(1,numPatients), size = 8, replace = F)] <- NA
+tblWrite$`Autoimmune`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Hx Cancer`[sample(x = seq(1,numPatients), size = 6, replace = F)] <- NA
+tblWrite$`Chronic opiate use`[sample(x = seq(1,numPatients), size = 7, replace = F)] <- NA
+tblWrite$`Immunocompromised (by med or comorbidity)`[sample(x = seq(1,numPatients), size = 9, replace = F)] <- NA
+tblWrite$`Smoker (including marijuana)`[sample(x = seq(1,numPatients), size = 34, replace = F)] <- NA
+tblWrite$`EtOH use disorder`[sample(x = seq(1,numPatients), size = 31, replace = F)] <- NA
+tblWrite$`Healthcare worker`[sample(x = seq(1,numPatients), size = 51, replace = F)] <- NA
+tblWrite$`Group living home (SNF / Rehab, etc)`[sample(x = seq(1,numPatients), size = 701, replace = F)] <- NA
+tblWrite$`Apartment`[sample(x = seq(1,numPatients), size = 12, replace = F)] <- NA
+
+potentialNullCols <- c(7,8,10,13,19,seq(25,46),48,49,51,53,57,58,60,61,62,63,64)
+
+# Five individuals have >10% of their data missing (match this)
+samplesAddNAs <- sample(x = seq(1,numPatients), size = 5, replace = F)
+tblWrite[samplesAddNAs[1], sample(x = potentialNullCols, size = sample(ceiling(seq(0.1*length(potentialNullCols),0.8*length(potentialNullCols))), size = 1), replace = F)] <- NA
+tblWrite[samplesAddNAs[2], sample(x = potentialNullCols, size = sample(ceiling(seq(0.1*length(potentialNullCols),0.8*length(potentialNullCols))), size = 1), replace = F)] <- NA
+tblWrite[samplesAddNAs[3], sample(x = potentialNullCols, size = sample(ceiling(seq(0.1*length(potentialNullCols),0.8*length(potentialNullCols))), size = 1), replace = F)] <- NA
+tblWrite[samplesAddNAs[4], sample(x = potentialNullCols, size = sample(ceiling(seq(0.1*length(potentialNullCols),0.8*length(potentialNullCols))), size = 1), replace = F)] <- NA
+tblWrite[samplesAddNAs[5], sample(x = potentialNullCols, size = sample(ceiling(seq(0.1*length(potentialNullCols),0.8*length(potentialNullCols))), size = 1), replace = F)] <- NA
+
+tblWrite
+```
+
+
+```{r writeData, message=FALSE, warning=FALSE}
+# Write data to excel sheet
+l <- list(Analysis = tblWrite)
+openxlsx::write.xlsx(l, file = "./CensusData/SampleData.xlsx")
+```
